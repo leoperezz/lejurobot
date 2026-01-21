@@ -138,13 +138,6 @@ mantra = [
     "langchain-openai>=1.0.3",
 ]
 
-# Project URLs
-[project.urls]
-homepage = "https://github.com/NONHUMAN-SITE/XHUMAN"
-repository = "https://github.com/NONHUMAN-SITE/XHUMAN"
-issues = "https://github.com/NONHUMAN-SITE/XHUMAN/issues"
-documentation = "https://github.com/NONHUMAN-SITE/XHUMAN#readme"
-
 # Development tools configuration
 [tool.black]
 line-length = 88
@@ -168,7 +161,7 @@ extend-exclude = '''
 profile = "black"
 multi_line_output = 3
 line_length = 88
-known_first_party = ["xhuman"]
+known_first_party = ["lejurobot"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -178,7 +171,7 @@ python_functions = ["test_*"]
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=xhuman",
+    "--cov=lejurobot",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
@@ -201,7 +194,7 @@ strict_equality = true
 
 # Package discovery
 [tool.setuptools.packages.find]
-include = ["xhuman*"]
+include = ["lejurobot*"]
 exclude = ["images*", "tests*", "scripts*"]
 
 # Build system
