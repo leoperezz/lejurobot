@@ -347,8 +347,6 @@ def train(cfg: TrainPipelineConfigLejuRobot, accelerator: Accelerator | None = N
 
     episodes = list(range(dataset.meta.total_episodes))
 
-    episodes = episodes[1700:]
-
     train_episodes, eval_episodes = split_train_eval_episodes(episodes, split_ratio=cfg.split_ratio, seed=42)
     
     #train_episodes = episodes[522:len(episodes)-1]
@@ -436,15 +434,30 @@ def train(cfg: TrainPipelineConfigLejuRobot, accelerator: Accelerator | None = N
     if hasattr(cfg.policy, "drop_n_last_frames"):
         logger.info(f"Dropping {cfg.policy.drop_n_last_frames} last frames")
         shuffle = False
+        # Use adjusted indices for filtered episodes if using XHumanDataset
+        if hasattr(dataset, 'get_episode_data_index_for_sampler'):
+            train_from_indices, train_to_indices = dataset.get_episode_data_index_for_sampler()
+        else:
+            train_from_indices = dataset.meta.episodes["dataset_from_index"]
+            train_to_indices = dataset.meta.episodes["dataset_to_index"]
+        
         sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
+            train_from_indices,
+            train_to_indices,
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
         )
+        
+        # Use adjusted indices for filtered episodes if using XHumanDataset
+        if hasattr(eval_dataset, 'get_episode_data_index_for_sampler'):
+            eval_from_indices, eval_to_indices = eval_dataset.get_episode_data_index_for_sampler()
+        else:
+            eval_from_indices = eval_dataset.meta.episodes["dataset_from_index"]
+            eval_to_indices = eval_dataset.meta.episodes["dataset_to_index"]
+        
         eval_sampler = EpisodeAwareSampler(
-            eval_dataset.meta.episodes["dataset_from_index"],
-            eval_dataset.meta.episodes["dataset_to_index"],
+            eval_from_indices,
+            eval_to_indices,
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=False,  # No shuffle for eval
         )

@@ -8,7 +8,7 @@ from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from lerobot.datasets.transforms import ImageTransforms
 from lerobot.datasets.factory import resolve_delta_timestamps
 import torch
-from lejurobot.configs.train import TrainPipelineConfigXHUMAN
+from lejurobot.configs.train import TrainPipelineConfigLejuRobot
 from lejurobot.datasets.lejurobot_dataset import LejuRobotDataset
 
 IMAGENET_STATS = {
@@ -17,7 +17,7 @@ IMAGENET_STATS = {
 }
 
 
-def make_dataset_xhuman(cfg: TrainPipelineConfigXHUMAN) -> LeRobotDataset | MultiLeRobotDataset:
+def make_dataset_lejurobot(cfg: TrainPipelineConfigLejuRobot) -> LeRobotDataset | MultiLeRobotDataset:
 
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None

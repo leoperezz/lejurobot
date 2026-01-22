@@ -1,7 +1,8 @@
+import torch
 import random
 from typing import Dict, List, Tuple
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-import torch
+from lejurobot.logger import logger
 
 class LejuRobotDataset(LeRobotDataset):
     """
@@ -31,6 +32,10 @@ class LejuRobotDataset(LeRobotDataset):
         self._global_to_local_index: Dict[int, int] | None = None
         self._local_to_global_index: List[int] | None = None
         self.train_with_subtasks = train_with_subtasks
+        
+        # Build index maps after initialization if episodes are filtered
+        if self.episodes is not None:
+            self._build_index_maps()
 
     def _build_index_maps(self) -> None:
         """
@@ -101,73 +106,70 @@ class LejuRobotDataset(LeRobotDataset):
         padding: Dict[str, torch.BoolTensor] = {}
 
         for key, delta_idx in self.delta_indices.items():
-            local_indices_for_key: List[int] = []
+            global_indices_for_key: List[int] = []
             pad_flags: List[bool] = []
 
             for delta in delta_idx:
                 target_global = current_global_index + delta
 
                 # Clamp to the episode range (in global space, consistent with metadata)
-                if target_global < ep_start:
-                    target_global = ep_start
-                elif target_global >= ep_end:
-                    target_global = ep_end - 1
+                clamped_target = target_global
+                if clamped_target < ep_start:
+                    clamped_target = ep_start
+                elif clamped_target >= ep_end:
+                    clamped_target = ep_end - 1
 
                 # Mark padding if, without clamping, the target would fall outside the episode
-                is_pad = (current_global_index + delta < ep_start) or (
-                    current_global_index + delta >= ep_end
-                )
+                is_pad = (target_global < ep_start) or (target_global >= ep_end)
                 pad_flags.append(is_pad)
 
-                # Convert global index -> local index in hf_dataset.
-                # Since we loaded the dataset filtered by complete episodes,
-                # all indices within [ep_start, ep_end) should exist.
-                try:
-                    local_idx = self._global_to_local_index[target_global]
-                except KeyError as e:
+                # Verify that the global index exists in our filtered dataset
+                # This ensures we don't try to access frames that aren't loaded
+                if clamped_target not in self._global_to_local_index:
                     raise IndexError(
-                        f"Global frame index {target_global} (episode {ep_idx}) "
-                        "not found in hf_dataset subset. This usually indicates "
-                        "that some frames from the selected episodes are missing "
-                        "in the loaded subset. Try increasing the split ratio."
-                    ) from e
+                        f"Global frame index {clamped_target} (episode {ep_idx}, delta {delta}) "
+                        f"not found in hf_dataset subset. Current global index: {current_global_index}, "
+                        f"Episode range: [{ep_start}, {ep_end}). "
+                        "This usually indicates that some frames from the selected episodes are missing "
+                        "in the loaded subset."
+                    )
 
-                local_indices_for_key.append(local_idx)
+                # Return the global index - _query_hf_dataset will map it to local
+                global_indices_for_key.append(clamped_target)
 
-            query_indices[key] = local_indices_for_key
+            query_indices[key] = global_indices_for_key
             padding[f"{key}_is_pad"] = torch.BoolTensor(pad_flags)
 
         return query_indices, padding
 
     def __getitem__(self, idx) -> dict:
-        # Ensure dataset is loaded when we actually need to read from it
+        
         self._ensure_hf_dataset_loaded()
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
-
         query_indices = None
+        
         if self.delta_indices is not None:
             query_indices, padding = self._get_query_indices(idx, ep_idx)
             query_result = self._query_hf_dataset(query_indices)
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
-
+        
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
             video_frames = self._query_videos(query_timestamps, ep_idx)
             item = {**video_frames, **item}
-
+        
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys
             for cam in image_keys:
                 item[cam] = self.image_transforms(item[cam])
-
         # Add task as a string
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks.iloc[task_idx].name
-
+        
         if self.train_with_subtasks:
             task = self.meta.tasks.iloc[task_idx].name
             next_task = self._get_only_task(idx + 1)
@@ -178,9 +180,8 @@ class LejuRobotDataset(LeRobotDataset):
                     item["train_with_subtask"] = True
                 else:
                     item["train_with_subtask"] = False
-
         return item
-    
+
     def _get_only_task(self, idx) -> str:
 
         self._ensure_hf_dataset_loaded()
@@ -190,3 +191,49 @@ class LejuRobotDataset(LeRobotDataset):
         task_idx = item["task_index"].item()
         task = self.meta.tasks.iloc[task_idx].name
         return task
+    
+    def get_episode_data_index_for_sampler(self) -> Tuple[List[int], List[int]]:
+        """
+        Returns adjusted episode indices for use with EpisodeAwareSampler when episodes are filtered.
+        
+        When specific episodes are selected, the metadata still contains global indices,
+        but the actual hf_dataset only contains frames from selected episodes.
+        This method returns the correct relative indices that match the filtered dataset.
+        
+        Returns:
+            Tuple of (from_indices, to_indices) adjusted for the filtered dataset.
+        """
+        if self.episodes is None:
+            # No filtering, return original indices
+            return (
+                list(self.meta.episodes["dataset_from_index"]),
+                list(self.meta.episodes["dataset_to_index"])
+            )
+        
+        # Ensure index maps are built
+        if self._global_to_local_index is None:
+            self._build_index_maps()
+        
+        from_indices = []
+        to_indices = []
+        
+        # For each selected episode, compute its relative indices in the filtered dataset
+        for ep_idx in self.episodes:
+            ep = self.meta.episodes[ep_idx]
+            global_from = ep["dataset_from_index"]
+            global_to = ep["dataset_to_index"]
+            
+            # Map global indices to local indices
+            try:
+                local_from = self._global_to_local_index[global_from]
+                # dataset_to_index is exclusive, so we need to get the last valid index + 1
+                # Find the local index for the last frame in the episode
+                local_to = self._global_to_local_index[global_to - 1] + 1
+                
+                from_indices.append(local_from)
+                to_indices.append(local_to)
+            except KeyError as e:
+                logger.warning(f"Episode {ep_idx} has missing frames in filtered dataset: {e}")
+                continue
+        
+        return from_indices, to_indices
