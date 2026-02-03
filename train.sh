@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES=1
 DATASET_REPO_ID="NONHUMAN-RESEARCH/pick-and-place-fruits_v2_cleaned"
 EXPERIMENT_NAME="flowact_training_fruits"
 PRETRAINED_PATH="lerobot/pi05_base"
-POLICY_TYPE="flowact"
+POLICY_TYPE="pi05"
 STEPS=20000
 
 #python xhuman/policies/pi05/train_val_pi05.py \
