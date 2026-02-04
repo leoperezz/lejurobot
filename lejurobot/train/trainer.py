@@ -18,6 +18,7 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from termcolor import colored
 from torch.optim import Optimizer
+from torch.utils.data.distributed import DistributedSampler
 
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
@@ -48,6 +49,78 @@ from lejurobot.train.strategies_ckpt import (
 )
 from lejurobot.train.strategies_ckpt import CheckpointStrategy
 
+
+# =============================================================================
+# Distributed Sampler for Episode-Aware Sampling
+# =============================================================================
+
+
+class DistributedEpisodeAwareSampler(DistributedSampler):
+    """
+    A DistributedSampler that wraps EpisodeAwareSampler for multi-GPU training.
+    
+    This ensures each GPU gets a different subset of the data while respecting
+    episode boundaries for proper frame dropping.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        episode_from_indices,
+        episode_to_indices,
+        drop_n_last_frames: int = 0,
+        shuffle: bool = True,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        seed: int = 0,
+    ):
+        super().__init__(
+            dataset,
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+            seed=seed,
+        )
+        self.episode_from_indices = episode_from_indices
+        self.episode_to_indices = episode_to_indices
+        self.drop_n_last_frames = drop_n_last_frames
+        self._shuffle = shuffle
+        self._seed = seed
+
+    def __iter__(self):
+        # Create the base episode-aware indices
+        base_sampler = EpisodeAwareSampler(
+            self.episode_from_indices,
+            self.episode_to_indices,
+            drop_n_last_frames=self.drop_n_last_frames,
+            shuffle=self._shuffle,
+        )
+        
+        # Set seed based on epoch for reproducibility
+        if self._shuffle:
+            g = torch.Generator()
+            g.manual_seed(self._seed + self.epoch)
+            indices = list(base_sampler)
+            # Shuffle the indices with the generator
+            perm = torch.randperm(len(indices), generator=g).tolist()
+            indices = [indices[i] for i in perm]
+        else:
+            indices = list(base_sampler)
+
+        # Subsample for this rank
+        indices = indices[self.rank : len(indices) : self.num_replicas]
+        
+        return iter(indices)
+
+    def __len__(self):
+        # Estimate length based on episode ranges and drop_n_last_frames
+        total_indices = 0
+        for from_idx, to_idx in zip(self.episode_from_indices, self.episode_to_indices):
+            episode_len = max(0, to_idx - from_idx - self.drop_n_last_frames)
+            total_indices += episode_len
+        return total_indices // self.num_replicas
+
+
 class Trainer:
     """
     Flexible trainer for XHUMAN policies.
@@ -77,6 +150,7 @@ class Trainer:
         self,
         cfg: TrainPipelineConfigLejuRobot,
         accelerator: Optional[Accelerator] = None,
+        use_distributed: bool = None,
     ):
         """
         Initialize the trainer.
@@ -84,19 +158,37 @@ class Trainer:
         Args:
             cfg: Training pipeline configuration.
             accelerator: Optional Accelerator instance. If None, one will be created.
+            use_distributed: Whether to enable distributed training features. If None,
+                automatically detected based on number of processes.
         """
         self.cfg = cfg
         self.cfg.validate()
         
         # Create or use provided accelerator
         if accelerator is None:
-            ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+            # Get distributed config parameters if available
+            gradient_accumulation_steps = getattr(cfg, 'gradient_accumulation_steps', 1)
+            find_unused_params = getattr(cfg, 'find_unused_parameters', True)
+            broadcast_buffers = getattr(cfg, 'broadcast_buffers', True)
+            
+            ddp_kwargs = DistributedDataParallelKwargs(
+                find_unused_parameters=find_unused_params,
+                broadcast_buffers=broadcast_buffers,
+            )
             self.accelerator = Accelerator(
+                gradient_accumulation_steps=gradient_accumulation_steps,
                 step_scheduler_with_optimizer=False,
                 kwargs_handlers=[ddp_kwargs]
             )
         else:
             self.accelerator = accelerator
+        
+        # Determine if we should use distributed features
+        if use_distributed is None:
+            # Auto-detect: use distributed if we have multiple processes
+            self.use_distributed = self.accelerator.num_processes > 1
+        else:
+            self.use_distributed = use_distributed
         
         # Initialize logging
         init_logging(accelerator=self.accelerator)
@@ -137,6 +229,11 @@ class Trainer:
         
         # Loss key for checkpoint strategies
         self.loss_key = None
+        
+        # Distributed training state
+        self.train_sampler = None
+        self.eval_sampler = None
+        self.current_epoch = 0
     
     def _init_wandb(self):
         """Initialize Weights & Biases logger."""
@@ -236,6 +333,13 @@ class Trainer:
             ds_meta=self.dataset.meta,
         )
         
+        # Convert BatchNorm to SyncBatchNorm if using distributed training
+        sync_batch_norms = getattr(self.cfg, 'sync_batch_norms', False)
+        if self.use_distributed and sync_batch_norms:
+            self.policy = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.policy)
+            if self.is_main_process:
+                logger.info("Converted BatchNorm to SyncBatchNorm for multi-GPU training")
+        
         self.accelerator.wait_for_everyone()
         
         # Create processors
@@ -286,43 +390,105 @@ class Trainer:
     
     def _create_dataloaders(self):
         """Create training and evaluation dataloaders."""
+        world_size = self.accelerator.num_processes
+        local_rank = self.accelerator.local_process_index
+        
         # Determine sampler configuration
         if hasattr(self.cfg.policy, "drop_n_last_frames"):
-            logger.info(f"Dropping {self.cfg.policy.drop_n_last_frames} last frames")
+            if self.is_main_process:
+                logger.info(f"Dropping {self.cfg.policy.drop_n_last_frames} last frames")
             shuffle = False
             
-            # Train sampler
+            # Get episode indices
             if hasattr(self.dataset, 'get_episode_data_index_for_sampler'):
                 train_from_indices, train_to_indices = self.dataset.get_episode_data_index_for_sampler()
             else:
                 train_from_indices = self.dataset.meta.episodes["dataset_from_index"]
                 train_to_indices = self.dataset.meta.episodes["dataset_to_index"]
             
-            train_sampler = EpisodeAwareSampler(
-                train_from_indices,
-                train_to_indices,
-                drop_n_last_frames=self.cfg.policy.drop_n_last_frames,
-                shuffle=True,
-            )
-            
-            # Eval sampler
             if hasattr(self.eval_dataset, 'get_episode_data_index_for_sampler'):
                 eval_from_indices, eval_to_indices = self.eval_dataset.get_episode_data_index_for_sampler()
             else:
                 eval_from_indices = self.eval_dataset.meta.episodes["dataset_from_index"]
                 eval_to_indices = self.eval_dataset.meta.episodes["dataset_to_index"]
             
-            eval_sampler = EpisodeAwareSampler(
-                eval_from_indices,
-                eval_to_indices,
-                drop_n_last_frames=self.cfg.policy.drop_n_last_frames,
-                shuffle=False,
-            )
+            # Use distributed sampler if enabled
+            if self.use_distributed:
+                if self.is_main_process:
+                    logger.info(f"Using DistributedEpisodeAwareSampler for {world_size} processes")
+                
+                train_sampler = DistributedEpisodeAwareSampler(
+                    self.dataset,
+                    train_from_indices,
+                    train_to_indices,
+                    drop_n_last_frames=self.cfg.policy.drop_n_last_frames,
+                    shuffle=True,
+                    num_replicas=world_size,
+                    rank=local_rank,
+                    seed=self.cfg.seed or 0,
+                )
+                
+                eval_sampler = DistributedEpisodeAwareSampler(
+                    self.eval_dataset,
+                    eval_from_indices,
+                    eval_to_indices,
+                    drop_n_last_frames=self.cfg.policy.drop_n_last_frames,
+                    shuffle=False,
+                    num_replicas=world_size,
+                    rank=local_rank,
+                    seed=self.cfg.seed or 0,
+                )
+            else:
+                train_sampler = EpisodeAwareSampler(
+                    train_from_indices,
+                    train_to_indices,
+                    drop_n_last_frames=self.cfg.policy.drop_n_last_frames,
+                    shuffle=True,
+                )
+                
+                eval_sampler = EpisodeAwareSampler(
+                    eval_from_indices,
+                    eval_to_indices,
+                    drop_n_last_frames=self.cfg.policy.drop_n_last_frames,
+                    shuffle=False,
+                )
         else:
-            logger.info("Not dropping any frames")
-            shuffle = True
-            train_sampler = None
-            eval_sampler = None
+            if self.is_main_process:
+                logger.info("Not dropping any frames")
+            
+            # Use standard distributed sampler if enabled
+            if self.use_distributed:
+                if self.is_main_process:
+                    logger.info(f"Using DistributedSampler for {world_size} processes")
+                
+                train_sampler = DistributedSampler(
+                    self.dataset,
+                    num_replicas=world_size,
+                    rank=local_rank,
+                    shuffle=True,
+                    seed=self.cfg.seed or 0,
+                )
+                
+                eval_sampler = DistributedSampler(
+                    self.eval_dataset,
+                    num_replicas=world_size,
+                    rank=local_rank,
+                    shuffle=False,
+                    seed=self.cfg.seed or 0,
+                )
+                shuffle = False
+            else:
+                train_sampler = None
+                eval_sampler = None
+                shuffle = True
+        
+        # Store samplers for epoch setting in distributed mode
+        self.train_sampler = train_sampler
+        self.eval_sampler = eval_sampler
+        
+        # Determine drop_last and persistent_workers based on distributed mode
+        drop_last = self.use_distributed  # Important for DDP to ensure equal batch sizes
+        persistent_workers = self.use_distributed and self.cfg.num_workers > 0
         
         # Create train dataloader
         self.train_dataloader = torch.utils.data.DataLoader(
@@ -332,8 +498,9 @@ class Trainer:
             shuffle=shuffle and not self.cfg.dataset.streaming,
             sampler=train_sampler,
             pin_memory=self.device.type == "cuda",
-            drop_last=False,
+            drop_last=drop_last,
             prefetch_factor=2 if self.cfg.num_workers > 0 else None,
+            persistent_workers=persistent_workers,
         )
         
         # Create eval dataloader
@@ -395,7 +562,9 @@ class Trainer:
             "update_s": AverageMeter("eval_s", ":.3f"),
         }
         
-        effective_batch_size = self.cfg.batch_size * self.accelerator.num_processes
+        # Calculate effective batch size accounting for gradient accumulation
+        gradient_accumulation_steps = getattr(self.cfg, 'gradient_accumulation_steps', 1)
+        effective_batch_size = self.cfg.batch_size * self.accelerator.num_processes * gradient_accumulation_steps
         
         self.train_tracker = MetricsTracker(
             effective_batch_size,
@@ -451,17 +620,34 @@ class Trainer:
         num_learnable_params = sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
         num_total_params = sum(p.numel() for p in self.policy.parameters())
         
+        logger.info("=" * 80)
+        logger.info(f"  Training Mode: {'DISTRIBUTED' if self.use_distributed else 'SINGLE-GPU'}")
+        logger.info("=" * 80)
         logger.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {self.cfg.output_dir}")
         if self.cfg.env is not None:
             logger.info(f"{self.cfg.env.task=}")
         logger.info(f"{self.cfg.steps=} ({format_big_number(self.cfg.steps)})")
         logger.info(f"{self.dataset.num_frames=} ({format_big_number(self.dataset.num_frames)})")
         logger.info(f"{self.dataset.num_episodes=}")
+        
+        # Calculate effective batch size
         num_processes = self.accelerator.num_processes
-        effective_bs = self.cfg.batch_size * num_processes
-        logger.info(f"Effective batch size: {self.cfg.batch_size} x {num_processes} = {effective_bs}")
+        gradient_accumulation_steps = getattr(self.cfg, 'gradient_accumulation_steps', 1)
+        effective_bs = self.cfg.batch_size * num_processes * gradient_accumulation_steps
+        
+        if self.use_distributed:
+            logger.info(f"World Size (num GPUs):       {num_processes}")
+            logger.info(f"Batch Size per GPU:          {self.cfg.batch_size}")
+            logger.info(f"Gradient Accumulation Steps: {gradient_accumulation_steps}")
+            logger.info(f"Effective Batch Size:        {effective_bs}")
+            logger.info(f"Mixed Precision:             {self.accelerator.mixed_precision}")
+        else:
+            logger.info(f"Batch Size: {self.cfg.batch_size}")
+            logger.info(f"Effective Batch Size: {effective_bs}")
+        
         logger.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
         logger.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+        logger.info("=" * 80)
     
     def update_policy(
         self,
@@ -604,8 +790,15 @@ class Trainer:
         if self.is_main_process:
             logger.info("Start offline training on a fixed dataset")
         
+        # Set initial epoch for distributed samplers
+        if self.use_distributed and hasattr(self.train_sampler, "set_epoch"):
+            self.train_sampler.set_epoch(self.current_epoch)
+        
         # Create infinite iterator over training data
         dl_iter = cycle(self.train_dataloader)
+        
+        # Track forward passes for epoch calculation in distributed mode
+        forward_step = 0
         
         # Training loop
         for _ in range(self.step, self.cfg.steps):
@@ -614,6 +807,18 @@ class Trainer:
             batch = next(dl_iter)
             batch = self.preprocessor(batch)
             dataloading_time = time.perf_counter() - start_time
+            
+            # Track forward steps for distributed epoch setting
+            forward_step += 1
+            
+            # Update epoch for distributed sampler if needed
+            if self.use_distributed and hasattr(self.train_sampler, "set_epoch"):
+                world_size = self.accelerator.num_processes
+                # Calculate new epoch based on dataset coverage
+                new_epoch = forward_step * self.cfg.batch_size * world_size // self.dataset.num_frames
+                if new_epoch > self.current_epoch:
+                    self.current_epoch = new_epoch
+                    self.train_sampler.set_epoch(self.current_epoch)
             
             # Update policy
             metrics_dict, output_dict = self.update_policy(batch)
@@ -685,6 +890,10 @@ class Trainer:
             logger.info(f"\n{'='*80}")
             logger.info(f"Evaluating policy at step {self.step}")
             logger.info(f"{'='*80}")
+        
+        # Set epoch for eval sampler if distributed
+        if self.use_distributed and hasattr(self.eval_sampler, "set_epoch"):
+            self.eval_sampler.set_epoch(self.current_epoch)
         
         # Run evaluation
         metrics_dict, eval_output_dict, batch_stats = self.evaluate_policy()
