@@ -15,3 +15,6 @@ def train(cfg: TrainPipelineConfigLejuRobot, accelerator: Accelerator | None = N
     trainer = Trainer(cfg, accelerator)
     trainer.setup(loss_key="loss")
     trainer.train()
+
+if __name__ == "__main__":
+    train()

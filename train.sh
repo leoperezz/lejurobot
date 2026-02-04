@@ -3,10 +3,12 @@ export CUDA_VISIBLE_DEVICES=1
 
 
 DATASET_REPO_ID="NONHUMAN-RESEARCH/pick-and-place-fruits_v2_cleaned"
-EXPERIMENT_NAME="flowact_training_fruits"
+EXPERIMENT_NAME="pi05"
 PRETRAINED_PATH="lerobot/pi05_base"
 POLICY_TYPE="pi05"
 STEPS=20000
+WANDB_ENTITY="icra-lejurobot"
+WANDB_PROJECT="toy-sorting"
 
 #python xhuman/policies/pi05/train_val_pi05.py \
 #python scripts/train_val.py \
@@ -24,7 +26,8 @@ python lejurobot/scripts/train_val.py \
     --policy.optimizer_lr=1.5e-5 \
     --policy.device=cuda \
     --wandb.enable=true \
-    --wandb.project=XHUMAN \
+    --wandb.entity=${WANDB_ENTITY} \
+    --wandb.project=${WANDB_PROJECT} \
     --policy.dtype=bfloat16 \
     --steps=${STEPS} \
     --eval_freq=200 \
