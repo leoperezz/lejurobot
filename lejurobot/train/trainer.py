@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Trainer class for XHUMAN policies.
+Trainer class for LejuRobot policies.
 
 This module provides a flexible Trainer class that encapsulates the training loop
 and can be extended with different update strategies for different policies.
@@ -123,7 +123,7 @@ class DistributedEpisodeAwareSampler(DistributedSampler):
 
 class Trainer:
     """
-    Flexible trainer for XHUMAN policies.
+    Flexible trainer for LejuRobot policies.
     
     This class encapsulates the training loop and can be extended to support
     different update strategies for different policies. The base implementation

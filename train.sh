@@ -2,13 +2,13 @@ export CUDA_VISIBLE_DEVICES=1
 #export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 
-DATASET_REPO_ID="NONHUMAN-RESEARCH/pick-and-place-fruits_v2_cleaned"
+DATASET_REPO_ID="leoperezz/LejuRobotTask1"
 EXPERIMENT_NAME="pi05"
 PRETRAINED_PATH="lerobot/pi05_base"
 POLICY_TYPE="pi05"
 STEPS=20000
 WANDB_ENTITY="icra-lejurobot"
-WANDB_PROJECT="toy-sorting"
+WANDB_PROJECT="task1"
 
 #python xhuman/policies/pi05/train_val_pi05.py \
 #python scripts/train_val.py \

@@ -6,8 +6,8 @@ from huggingface_hub import HfApi, create_repo, upload_folder
 from dotenv import load_dotenv
 
 
-DATASET_PATH = "/home/lperez/.cache/huggingface/lerobot/NONHUMAN-RESEARCH/pick-and-place-fruits_v2_cleaned"
-REPO_ID = "NONHUMAN-RESEARCH/pick-and-place-fruits_v2_cleaned"
+DATASET_PATH = "/home/lperez/main/NONHUMAN/lejurobot/outputs/dataset/LejuRobotTask1"
+REPO_ID = "leoperezz/LejuRobotTask1"
 PRIVATE = False
 COMMIT_MESSAGE = "Upload dataset"
 BRANCH = "v3.0"
