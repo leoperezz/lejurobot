@@ -17,7 +17,7 @@ python lejurobot/scripts/train_val.py \
     --policy.type=${POLICY_TYPE} \
     --output_dir=./outputs/${EXPERIMENT_NAME} \
     --job_name=${EXPERIMENT_NAME} \
-    --policy.repo_id=NONHUMAN-RESEARCH/${EXPERIMENT_NAME} \
+    --policy.repo_id=leoperezz/${EXPERIMENT_NAME} \
     --policy.pretrained_path=${PRETRAINED_PATH} \
     --policy.compile_model=false \
     --policy.gradient_checkpointing=true \

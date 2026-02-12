@@ -180,7 +180,7 @@ cat > accelerate_config.yaml << EOF
 compute_environment: LOCAL_MACHINE
 distributed_type: MULTI_GPU
 num_processes: 4
-mixed_precision: fp16
+mixed_precision: bf16
 gpu_ids: all
 EOF
 
@@ -294,6 +294,163 @@ cfg = DistributedTrainConfig(
        num_workers=4,  # Per GPU (e.g., 4 GPUs × 4 workers = 16 total workers)
    )
    ```
+
+### Using the Multi-GPU Training Script
+
+For convenience, we provide a pre-configured shell script for multi-GPU training with PI05 policy:
+
+**File:** `train_multigpu.sh`
+
+#### Prerequisites
+
+1. **Configure Accelerate** (one-time setup):
+```bash
+accelerate config
+```
+
+When prompted, a typical multi-GPU setup looks like this:
+- **Type of machine**: `multi-GPU` (or equivalent option)
+- **Number of machines**: choose based on your setup (often `1`)
+- **Check distributed operations for errors**: `NO` (recommended for speed)
+- **Use torch dynamo**: `NO`
+- **Use DeepSpeed**: `NO`
+- **Use FullyShardedDataParallel (FSDP)**: `NO`
+- **Use Megatron-LM**: `NO`
+- **Number of GPU(s) for distributed training**: set according to your hardware (e.g. `2`, `4`, ...)
+- **GPU IDs to use**: `all` (or a comma-separated list of GPU IDs)
+- **Enable NUMA efficiency**: `yes` (recommended on NVIDIA hardware)
+- **Mixed precision**: `bf16` (recommended; use `fp16` only if needed)
+
+2. **Verify configuration:**
+```bash
+accelerate env
+```
+
+#### Configuration
+
+Edit the script variables according to your setup:
+
+```bash
+# Multi-GPU Configuration
+NUM_GPUS=4                      # Number of GPUs available
+GRADIENT_ACCUMULATION_STEPS=8   # Gradient accumulation for larger effective batch size
+BATCH_SIZE_PER_GPU=4            # Batch size per GPU
+
+# Dataset and Experiment
+DATASET_REPO_ID="your/dataset"
+EXPERIMENT_NAME="pi05"
+PRETRAINED_PATH="lerobot/pi05_base"
+POLICY_TYPE="pi05"
+STEPS=20000
+WANDB_ENTITY="your-entity"
+WANDB_PROJECT="your-project"
+```
+
+#### Understanding Effective Batch Size
+
+The effective batch size is calculated as:
+```
+Effective Batch Size = BATCH_SIZE_PER_GPU × NUM_GPUS × GRADIENT_ACCUMULATION_STEPS
+```
+
+**Example configurations:**
+
+| GPUs | Batch/GPU | Grad Accum | Effective BS | Memory (~GB) | Recommendation |
+|------|-----------|------------|--------------|--------------|----------------|
+| 2    | 4         | 8          | 64           | ~16GB        | ✅ Minimum acceptable |
+| 2    | 4         | 16         | 128          | ~16GB        | ⭐ Recommended |
+| 4    | 4         | 4          | 64           | ~16GB        | ✅ Good |
+| 4    | 4         | 8          | 128          | ~16GB        | ⭐ Optimal |
+| 4    | 8         | 4          | 128          | ~24GB        | ⭐ If you have VRAM |
+
+For **PI05 (Diffusion Policy)**, an effective batch size of **64-128** is recommended for stable training.
+
+#### Running the Script
+
+1. **Make the script executable:**
+```bash
+chmod +x train_multigpu.sh
+```
+
+2. **Run the training:**
+```bash
+./train_multigpu.sh
+```
+
+The script will display the configuration before starting:
+```
+Configuration:
+  GPUs: 4
+  Batch size per GPU: 4
+  Gradient accumulation steps: 8
+  Effective batch size: 128
+```
+
+#### Adjusting for Memory Constraints
+
+If you encounter CUDA out-of-memory errors:
+
+1. **Reduce batch size per GPU:**
+```bash
+BATCH_SIZE_PER_GPU=2
+```
+
+2. **Increase gradient accumulation to maintain effective batch size:**
+```bash
+GRADIENT_ACCUMULATION_STEPS=16  # Now: 2 × 4 × 16 = 128
+```
+
+3. **Enable memory-efficient CUDA allocation:**
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+#### Learning Rate Considerations
+
+The learning rate may need adjustment based on your effective batch size:
+
+- **Default LR:** `1.5e-5` (conservative, suitable for small batches)
+- **For effective BS 128:** Consider `3e-5` to `5e-5`
+- **Maximum for diffusion models:** `1e-4`
+
+To adjust, edit the script:
+```bash
+--policy.optimizer_lr=3e-5 \  # Increased for larger batch size
+```
+
+#### Monitoring Training
+
+The script automatically logs to:
+- **WandB:** Real-time metrics and visualizations
+- **Local logs:** Terminal output with training progress
+- **Checkpoints:** Saved to `./outputs/${EXPERIMENT_NAME}/checkpoints/`
+
+**Log frequency:**
+- Training metrics: Every 200 steps (configurable with `--log_freq`)
+- Evaluation: Every 200 steps (configurable with `--eval_freq`)
+- Checkpoints: Every 500 steps (configurable with `--save_freq`)
+
+#### Advanced Options
+
+**Enable profiling for performance analysis:**
+```bash
+--enable_profiling=true \
+--profiling_warmup_steps=5 \
+--profiling_active_steps=10 \
+--profiling_output_dir=./profiling \
+```
+
+**Adjust evaluation:**
+```bash
+--num_eval_batches=100 \  # Number of batches to evaluate
+--eval_freq=100 \          # Evaluate more frequently
+```
+
+**Memory optimization:**
+```bash
+--policy.gradient_checkpointing=true \  # Already enabled
+--num_workers=2 \                       # Reduce if CPU memory is limited
+```
 
 ### Troubleshooting
 
