@@ -37,6 +37,8 @@ def make_dataset_lejurobot(cfg: TrainPipelineConfigLejuRobot) -> LeRobotDataset 
                 image_transforms=image_transforms,
                 revision=cfg.dataset.revision,
                 video_backend=cfg.dataset.video_backend,
+                data_augmentation=cfg.data_augmentation,
+                data_augmentation_temperature=cfg.data_augmentation_temperature,
             )
         else:
             dataset = StreamingLeRobotDataset(

@@ -13,6 +13,8 @@ class TrainPipelineConfigLejuRobot(TrainPipelineConfig):
         split_ratio: Fraction of episodes reserved for training (rest is used for eval).
         only_last_best: When True, keeps only 'last' and 'best' checkpoints.
         num_eval_batches: Number of batches to use for evaluation.
+        data_augmentation: Enable morphological symmetry data augmentation.
+        data_augmentation_temperature: Probability threshold for applying augmentation (0.0-1.0).
     """
     # Train/eval split
     split_ratio: float = 0.8
@@ -22,6 +24,10 @@ class TrainPipelineConfigLejuRobot(TrainPipelineConfig):
     
     # Evaluation configuration
     num_eval_batches: int = 50
+    
+    # Data augmentation configuration
+    data_augmentation: bool = False
+    data_augmentation_temperature: float = 0.5
 
 
 @dataclass

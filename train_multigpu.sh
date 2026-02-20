@@ -24,6 +24,10 @@ STEPS=20000
 WANDB_ENTITY="icra-lejurobot"
 WANDB_PROJECT="task1"
 
+# Data Augmentation Configuration
+DATA_AUGMENTATION=true  # Enable/disable morphological symmetry augmentation
+DATA_AUGMENTATION_TEMPERATURE=0.5  # Probability threshold for applying augmentation (0.0-1.0)
+
 # ============================================================================
 # Calculate effective batch size
 # Effective BS = BATCH_SIZE_PER_GPU × NUM_GPUS × GRADIENT_ACCUMULATION_STEPS
@@ -69,4 +73,6 @@ accelerate launch \
     --batch_size=${BATCH_SIZE_PER_GPU} \
     --save_freq=500 \
     --num_workers=4 \
-    --sync_batch_norms=true
+    --sync_batch_norms=true \
+    --data_augmentation=${DATA_AUGMENTATION} \
+    --data_augmentation_temperature=${DATA_AUGMENTATION_TEMPERATURE}

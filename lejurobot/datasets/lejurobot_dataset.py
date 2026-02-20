@@ -4,6 +4,16 @@ from typing import Dict, List, Tuple
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lejurobot.logger import logger
 
+def print_batch(batch: dict):
+    """
+    Print the batch in a readable format.
+    """
+    for key, value in batch.items():
+        print(f"{key}:")
+        if isinstance(value, torch.Tensor):
+            print(f"Shape: {value.shape}")
+        print("\n")
+
 class LejuRobotDataset(LeRobotDataset):
     """
     Extension of `LeRobotDataset` that correctly handles filtered `episodes`
@@ -25,13 +35,22 @@ class LejuRobotDataset(LeRobotDataset):
     This works well in LeRobotDataset V3.0
     """
 
-    def __init__(self, *args, train_with_subtasks: bool = False, **kwargs):
+    def __init__(
+        self, 
+        *args, 
+        train_with_subtasks: bool = False,
+        data_augmentation: bool = False,
+        data_augmentation_temperature: float = 0.5,
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
         # Maps to convert between global indices ("index" column)
         # and local indices (position in `hf_dataset`).
         self._global_to_local_index: Dict[int, int] | None = None
         self._local_to_global_index: List[int] | None = None
         self.train_with_subtasks = train_with_subtasks
+        self.data_augmentation = data_augmentation
+        self.data_augmentation_temperature = data_augmentation_temperature
         
         # Build index maps after initialization if episodes are filtered
         if self.episodes is not None:
@@ -180,6 +199,13 @@ class LejuRobotDataset(LeRobotDataset):
                     item["train_with_subtask"] = True
                 else:
                     item["train_with_subtask"] = False
+        
+        # Apply morphological symmetry augmentation if enabled
+        if self.data_augmentation:
+            if random.random() < self.data_augmentation_temperature:
+                item = self._apply_symmetry_augmentation(item)
+        
+        print_batch(item)
         return item
 
     def _get_only_task(self, idx) -> str:
@@ -191,6 +217,75 @@ class LejuRobotDataset(LeRobotDataset):
         task_idx = item["task_index"].item()
         task = self.meta.tasks.iloc[task_idx].name
         return task
+    
+    def _apply_symmetry_augmentation(self, item: dict) -> dict:
+        """
+        Apply morphological symmetry augmentation:
+        1. Flip all images horizontally (mirror reflection)
+        2. Swap left and right wrist camera images (both RGB and depth)
+        3. Swap first 8 columns with last 8 columns in action tensor (for joint symmetry)
+        
+        Args:
+            item: Dictionary containing the dataset item
+            
+        Returns:
+            Modified item dictionary with augmentation applied
+        """
+        # Keys for camera images
+        wrist_cam_r_key = "observation.images.wrist_cam_r"
+        wrist_cam_l_key = "observation.images.wrist_cam_l"
+        head_cam_h_key = "observation.images.head_cam_h"
+        
+        # Keys for depth images
+        depth_r_key = "observation.depth_r"
+        depth_l_key = "observation.depth_l"
+        depth_h_key = "observation.depth_h"
+        
+        # Flip all RGB images horizontally (mirror reflection)
+        # Images are in CHW format: [C, H, W] = [3, 480, 640]
+        if wrist_cam_r_key in item:
+            item[wrist_cam_r_key] = torch.flip(item[wrist_cam_r_key], dims=[2])  # Flip along width dimension
+        
+        if wrist_cam_l_key in item:
+            item[wrist_cam_l_key] = torch.flip(item[wrist_cam_l_key], dims=[2])  # Flip along width dimension
+        
+        if head_cam_h_key in item:
+            item[head_cam_h_key] = torch.flip(item[head_cam_h_key], dims=[2])  # Flip along width dimension
+        
+        # Flip all depth images horizontally
+        if depth_r_key in item:
+            item[depth_r_key] = torch.flip(item[depth_r_key], dims=[2])  # Flip along width dimension
+        
+        if depth_l_key in item:
+            item[depth_l_key] = torch.flip(item[depth_l_key], dims=[2])  # Flip along width dimension
+        
+        if depth_h_key in item:
+            item[depth_h_key] = torch.flip(item[depth_h_key], dims=[2])  # Flip along width dimension
+        
+        # Swap left and right wrist camera images (RGB)
+        if wrist_cam_r_key in item and wrist_cam_l_key in item:
+            temp = item[wrist_cam_r_key].clone()
+            item[wrist_cam_r_key] = item[wrist_cam_l_key].clone()
+            item[wrist_cam_l_key] = temp
+        
+        # Swap left and right wrist depth images
+        if depth_r_key in item and depth_l_key in item:
+            temp = item[depth_r_key].clone()
+            item[depth_r_key] = item[depth_l_key].clone()
+            item[depth_l_key] = temp
+        
+        # Swap first 8 columns with last 8 columns in action tensor
+        # Action shape: [50, 16] -> swap columns 0:8 with 8:16
+        if "action" in item:
+            action = item["action"]  # Shape: [50, 16]
+            # Swap first 8 columns with last 8 columns
+            action_swapped = torch.cat([
+                action[:, 8:16],  # Last 8 columns go first
+                action[:, 0:8]     # First 8 columns go last
+            ], dim=1)
+            item["action"] = action_swapped
+        
+        return item
     
     def get_episode_data_index_for_sampler(self) -> Tuple[List[int], List[int]]:
         """

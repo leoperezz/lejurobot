@@ -10,6 +10,10 @@ STEPS=20000
 WANDB_ENTITY="icra-lejurobot"
 WANDB_PROJECT="task1"
 
+# Data Augmentation Configuration
+DATA_AUGMENTATION=true  # Enable/disable morphological symmetry augmentation
+DATA_AUGMENTATION_TEMPERATURE=0.5  # Probability threshold for applying augmentation (0.0-1.0)
+
 #python xhuman/policies/pi05/train_val_pi05.py \
 #python scripts/train_val.py \
 python lejurobot/scripts/train_val.py \
@@ -35,3 +39,5 @@ python lejurobot/scripts/train_val.py \
     --split_ratio=0.9 \
     --batch_size=4 \
     --save_freq=500 \
+    --data_augmentation=${DATA_AUGMENTATION} \
+    --data_augmentation_temperature=${DATA_AUGMENTATION_TEMPERATURE} \
